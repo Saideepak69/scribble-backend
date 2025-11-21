@@ -9,10 +9,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: [
-      "http://localhost:5173", 
-      "https://scribble-game-xxxx.vercel.app"  // Add your Vercel URL here
-    ],
+    origin: "*",  // <--- Allow ANY connection (Fixes all connection issues)
     methods: ["GET", "POST"]
   }
 });
