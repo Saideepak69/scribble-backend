@@ -29,39 +29,43 @@ let gameActive = false;
 let roundTimer = null;
 let roundStartTime = null;
 let roundEndTime = null;
+let sessionStartTime = null;
+let sessionTimer = null;
+let countdownTimer = null;
 
 const wordList = [
   "apple", "banana", "cat", "dog", "car", "house", "tree", "sun", 
   "moon", "star", "computer", "phone", "book", "chair", "table",
   "guitar", "pizza", "camera", "clock", "flower", "mountain", "ocean",
-  "pencil", "bottle", "lamp", "door", "window", "bird", "fish", "rocket"
+  "pencil", "bottle", "lamp", "door", "window", "bird", "fish", "rocket",
+  "bicycle", "umbrella", "butterfly", "rainbow", "cloud", "beach", "forest"
 ];
 
-const ROUND_DURATION = 60000; // 60 seconds per round
+const ROUND_DURATION = 120000; // 2 minutes per round
+const SESSION_DURATION = 600000; // 10 minutes total session
+const COUNTDOWN_DURATION = 20000; // 20 seconds countdown before start
 
 // Helper functions
 function broadcastUserList() {
   const list = Object.values(users);
-  console.log("📋 Broadcasting user list:", list);
   io.emit("userList", list);
 }
 
 function broadcastScores() {
-  console.log("🏆 Broadcasting scores:", scores);
   io.emit("scoreUpdate", { scores });
 }
 
 function broadcastGameState() {
   const drawerName = currentDrawer ? users[currentDrawer] : null;
   const timeRemaining = roundEndTime ? Math.max(0, roundEndTime - Date.now()) : 0;
-  
-  console.log("🎮 Broadcasting game state - Drawer:", drawerName, "Active:", gameActive);
+  const sessionTimeRemaining = sessionStartTime ? Math.max(0, SESSION_DURATION - (Date.now() - sessionStartTime)) : 0;
   
   io.emit("gameState", {
     gameActive,
     currentDrawer: drawerName,
     hasWord: !!currentWord,
-    timeRemaining: Math.floor(timeRemaining / 1000) // in seconds
+    timeRemaining: Math.floor(timeRemaining / 1000),
+    sessionTimeRemaining: Math.floor(sessionTimeRemaining / 1000)
   });
 }
 
@@ -78,17 +82,58 @@ function getNextDrawer() {
   return socketIds[nextIndex];
 }
 
+function startCountdown() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  
+  let countdown = 20;
+  io.emit("countdown", { seconds: countdown });
+  
+  countdownTimer = setInterval(() => {
+    countdown--;
+    io.emit("countdown", { seconds: countdown });
+    
+    if (countdown <= 0) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+      startSession();
+    }
+  }, 1000);
+}
+
+function startSession() {
+  sessionStartTime = Date.now();
+  gameActive = true;
+  
+  console.log("=".repeat(60));
+  console.log("🎮 SESSION STARTED!");
+  console.log(`   Duration: ${SESSION_DURATION / 60000} minutes`);
+  console.log(`   Players: ${Object.keys(users).length}`);
+  console.log("=".repeat(60));
+  
+  io.emit("chatMessage", { 
+    from: "System", 
+    text: "🎮 Game session started! You have 10 minutes to play!" 
+  });
+  
+  // Start first round
+  startNewRound();
+  
+  // Set session end timer
+  if (sessionTimer) clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => {
+    endSession();
+  }, SESSION_DURATION);
+}
+
 function startNewRound() {
   currentDrawer = getNextDrawer();
   
   if (!currentDrawer) {
     console.log("⚠️  No players available to draw");
-    gameActive = false;
     return;
   }
 
   currentWord = selectRandomWord();
-  gameActive = true;
   roundStartTime = Date.now();
   roundEndTime = roundStartTime + ROUND_DURATION;
 
@@ -98,34 +143,27 @@ function startNewRound() {
   console.log(`   Drawer: ${drawerName}`);
   console.log(`   Word: "${currentWord}"`);
   console.log(`   Duration: ${ROUND_DURATION / 1000}s`);
-  console.log(`   Players: ${Object.keys(users).length}`);
   console.log("=".repeat(60));
 
-  // Clear the board
   io.emit("clearBoard");
 
-  // Announce new round
   io.emit("chatMessage", { 
     from: "System", 
-    text: `🎨 ${drawerName} is now drawing! You have 60 seconds to guess!` 
+    text: `🎨 ${drawerName} is now drawing! You have 2 minutes to guess!` 
   });
 
-  // Send word only to drawer
   io.to(currentDrawer).emit("yourWord", { word: currentWord });
-  console.log(`📤 Sent word "${currentWord}" to ${drawerName}`);
 
-  // Broadcast game state
   broadcastGameState();
 
-  // Set round timer
   if (roundTimer) clearTimeout(roundTimer);
   roundTimer = setTimeout(() => {
     endRound(false);
   }, ROUND_DURATION);
 
-  // Timer updates every second
+  // Update game state every second
   const timerInterval = setInterval(() => {
-    if (!gameActive) {
+    if (!gameActive || !currentWord) {
       clearInterval(timerInterval);
       return;
     }
@@ -139,11 +177,7 @@ function endRound(someoneGuessed = false) {
     roundTimer = null;
   }
 
-  if (!gameActive) return;
-
-  gameActive = false;
-  roundStartTime = null;
-  roundEndTime = null;
+  if (!currentWord) return;
 
   console.log("🏁 ROUND ENDED - Someone guessed:", someoneGuessed);
 
@@ -160,41 +194,93 @@ function endRound(someoneGuessed = false) {
   }
 
   currentWord = null;
-  broadcastGameState();
+  roundStartTime = null;
+  roundEndTime = null;
+  
+  // Check if session is still active
+  if (!gameActive || !sessionStartTime) return;
+  
+  const sessionTimeRemaining = SESSION_DURATION - (Date.now() - sessionStartTime);
+  
+  if (sessionTimeRemaining <= 0) {
+    endSession();
+    return;
+  }
   
   // Start next round after 5 seconds
   setTimeout(() => {
     const playerCount = Object.keys(users).length;
-    console.log(`⏳ Starting next round in 5s... (${playerCount} players)`);
-    if (playerCount >= 1) {
+    if (playerCount >= 1 && gameActive) {
       startNewRound();
-    } else {
-      console.log("⚠️  Not enough players to start new round");
+    } else if (playerCount < 1) {
+      endSession();
     }
   }, 5000);
 }
 
-function stopGame() {
-  if (roundTimer) {
-    clearTimeout(roundTimer);
-    roundTimer = null;
-  }
-
+function endSession() {
+  if (roundTimer) clearTimeout(roundTimer);
+  if (sessionTimer) clearTimeout(sessionTimer);
+  if (countdownTimer) clearInterval(countdownTimer);
+  
+  roundTimer = null;
+  sessionTimer = null;
+  countdownTimer = null;
+  
   gameActive = false;
   currentDrawer = null;
   currentWord = null;
   roundStartTime = null;
   roundEndTime = null;
+  sessionStartTime = null;
 
-  console.log("🛑 GAME STOPPED");
+  console.log("=".repeat(60));
+  console.log("🏆 SESSION ENDED!");
+  console.log("   Final Scores:", scores);
+  console.log("=".repeat(60));
 
-  io.emit("chatMessage", { 
-    from: "System", 
-    text: "🛑 Game stopped by host!" 
-  });
+  // Calculate winner
+  const sortedScores = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  
+  if (sortedScores.length > 0) {
+    const [winner, winnerScore] = sortedScores[0];
+    
+    io.emit("sessionEnded", {
+      winner,
+      finalScores: scores,
+      leaderboard: sortedScores
+    });
+    
+    io.emit("chatMessage", { 
+      from: "System", 
+      text: `🏆 GAME OVER! Winner: ${winner} with ${winnerScore} points!` 
+    });
+    
+    // Show top 3
+    const top3 = sortedScores.slice(0, 3);
+    top3.forEach(([name, score], index) => {
+      const medal = ["🥇", "🥈", "🥉"][index];
+      io.emit("chatMessage", { 
+        from: "System", 
+        text: `${medal} ${index + 1}. ${name}: ${score} points` 
+      });
+    });
+  } else {
+    io.emit("sessionEnded", {
+      winner: null,
+      finalScores: {},
+      leaderboard: []
+    });
+  }
 
   io.emit("clearBoard");
   broadcastGameState();
+  
+  // Reset scores for next session
+  setTimeout(() => {
+    scores = {};
+    broadcastScores();
+  }, 10000); // Reset after 10 seconds
 }
 
 io.on("connection", (socket) => {
@@ -202,15 +288,12 @@ io.on("connection", (socket) => {
   console.log("✅ NEW CLIENT CONNECTED!");
   console.log("   Socket ID:", socket.id);
   console.log("   Time:", new Date().toLocaleTimeString());
-  console.log("   Transport:", socket.conn.transport.name);
   console.log("=".repeat(60));
 
-  // Send current state
   socket.emit("scoreUpdate", { scores });
   socket.emit("userList", Object.values(users));
   broadcastGameState();
 
-  // Join game
   socket.on("join", (name) => {
     const n = String(name).trim() || `Player_${socket.id.slice(0, 4)}`;
     users[socket.id] = n;
@@ -225,87 +308,77 @@ io.on("connection", (socket) => {
     socket.emit("chatMessage", { from: "System", text: `Welcome ${n}! 👋` });
     socket.broadcast.emit("chatMessage", { from: "System", text: `${n} joined the game` });
 
-    console.log(`   Total players: ${Object.keys(users).length}`);
-  });
-
-  // Start game (any player can start)
-  socket.on("startGame", () => {
     const playerCount = Object.keys(users).length;
-    const playerName = users[socket.id] || "Unknown";
+    console.log(`   Total players: ${playerCount}`);
     
-    console.log(`🎮 ${playerName} requested to start game`);
-    
-    if (gameActive) {
-      socket.emit("chatMessage", { from: "System", text: "Game is already running!" });
-      return;
+    // Start countdown when 2 players join and game is not active
+    if (playerCount === 2 && !gameActive && !sessionStartTime && !countdownTimer) {
+      console.log("🚀 2 players joined! Starting countdown...");
+      io.emit("chatMessage", { 
+        from: "System", 
+        text: "🎮 2 players joined! Game starting in 20 seconds..." 
+      });
+      startCountdown();
     }
-
-    if (playerCount < 1) {
-      socket.emit("chatMessage", { from: "System", text: "Need at least 1 player to start!" });
-      return;
-    }
-
-    io.emit("chatMessage", { 
-      from: "System", 
-      text: `🎮 ${playerName} started the game! Get ready!` 
-    });
-
-    setTimeout(() => startNewRound(), 2000);
   });
 
-  // Stop game (any player can stop)
-  socket.on("stopGame", () => {
-    const playerName = users[socket.id] || "Unknown";
-    console.log(`🛑 ${playerName} requested to stop game`);
-    
-    if (!gameActive) {
-      socket.emit("chatMessage", { from: "System", text: "No game is running!" });
-      return;
+  // Leave game
+  socket.on("leaveGame", () => {
+    const name = users[socket.id];
+    if (name) {
+      console.log("👋", name, "left the game (voluntary)");
+      
+      io.emit("chatMessage", { from: "System", text: `${name} left the game` });
+      
+      // If drawer left, start new round
+      if (socket.id === currentDrawer && gameActive) {
+        io.emit("chatMessage", { 
+          from: "System", 
+          text: `${name} (the drawer) left. Starting new round...` 
+        });
+        endRound(false);
+      }
+      
+      delete users[socket.id];
+      broadcastUserList();
+      
+      // Check if enough players remain
+      if (Object.keys(users).length < 1 && gameActive) {
+        io.emit("chatMessage", { 
+          from: "System", 
+          text: "Not enough players. Ending session..." 
+        });
+        endSession();
+      }
     }
-
-    stopGame();
+    
+    socket.disconnect();
   });
 
-  // Handle drawing strokes
   socket.on("stroke", (stroke) => {
-    if (socket.id !== currentDrawer) {
-      console.log("⚠️  Non-drawer tried to draw:", users[socket.id]);
-      return;
-    }
-
+    if (socket.id !== currentDrawer) return;
     if (stroke && stroke.from && stroke.to) {
       socket.broadcast.emit("remoteStroke", stroke);
     }
   });
 
-  // Handle clear board
   socket.on("clear", () => {
-    if (socket.id !== currentDrawer) {
-      console.log("⚠️  Non-drawer tried to clear:", users[socket.id]);
-      return;
-    }
-    
-    console.log("🗑️  Board cleared by", users[socket.id]);
+    if (socket.id !== currentDrawer) return;
     io.emit("clearBoard");
   });
 
-  // Handle chat messages
   socket.on("chat", ({ from, text }) => {
     const player = from || users[socket.id] || `Player_${socket.id.slice(0, 4)}`;
-    console.log(`💬 [${player}]: ${text}`);
     io.emit("chatMessage", { from: player, text });
   });
 
-  // Handle guess attempts
   socket.on("guess", ({ from, text }) => {
     const guessText = String(text || "").trim();
     const player = from || users[socket.id] || `Player_${socket.id.slice(0, 4)}`;
     
     if (!guessText) return;
 
-    // Drawer's messages are just chat
     if (socket.id === currentDrawer) {
-      console.log(`💬 [${player} - DRAWER]: ${guessText}`);
       io.emit("chatMessage", { from: player, text: guessText });
       return;
     }
@@ -338,32 +411,26 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Handle disconnect
   socket.on("disconnect", () => {
     const name = users[socket.id];
     if (name) {
-      console.log("=".repeat(60));
-      console.log("❌ USER DISCONNECTED:", name, `(${socket.id})`);
-      console.log("=".repeat(60));
+      console.log("❌ USER DISCONNECTED:", name);
       
-      if (socket.id === currentDrawer) {
+      if (socket.id === currentDrawer && gameActive) {
         io.emit("chatMessage", { 
           from: "System", 
-          text: `${name} (the drawer) left. Starting new round...` 
+          text: `${name} (the drawer) disconnected. Starting new round...` 
         });
         endRound(false);
       } else {
-        io.emit("chatMessage", { from: "System", text: `${name} left the game` });
+        io.emit("chatMessage", { from: "System", text: `${name} disconnected` });
       }
       
       delete users[socket.id];
       broadcastUserList();
       
-      const remainingPlayers = Object.keys(users).length;
-      console.log(`   Remaining players: ${remainingPlayers}`);
-      
-      if (remainingPlayers < 1 && gameActive) {
-        stopGame();
+      if (Object.keys(users).length < 1 && gameActive) {
+        endSession();
       }
     }
   });
@@ -374,6 +441,8 @@ server.listen(PORT, () => {
   console.log("🚀 SCRIBBLE GAME SERVER STARTED!");
   console.log(`   Port: ${PORT}`);
   console.log(`   Time: ${new Date().toLocaleString()}`);
+  console.log(`   Session Duration: ${SESSION_DURATION / 60000} minutes`);
+  console.log(`   Round Duration: ${ROUND_DURATION / 1000} seconds`);
   console.log(`   Word pool: ${wordList.length} words`);
   console.log("=".repeat(60));
 });
