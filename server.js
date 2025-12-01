@@ -312,7 +312,7 @@ io.on("connection", (socket) => {
     console.log(`   Total players: ${playerCount}`);
     
     // Start countdown when 2 players join and game is not active
-    if (playerCount === 2 && !gameActive && !sessionStartTime && !countdownTimer) {
+    if (playerCount >= 2 && !gameActive && !sessionStartTime && !countdownTimer) {
       console.log("🚀 2 players joined! Starting countdown...");
       io.emit("chatMessage", { 
         from: "System", 
